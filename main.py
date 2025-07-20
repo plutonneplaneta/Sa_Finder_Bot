@@ -28,7 +28,7 @@ load_dotenv()
 # Состояния
 ADD_CHANNEL, IMPORT_WALLET, SET_AMOUNT, SET_SLIPPAGE, REMOVE_CHANNEL, REMOVE_WALLET = range(6)
 
-
+#воровская лапа
 class UserBotManager:
     def __init__(self):
         self.client = None
