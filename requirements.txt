@@ -1,0 +1,10 @@
+python-telegram-bot==20.3
+telethon==1.34.1
+httpx==0.26.0
+solana==0.30.0
+solders==0.18.0
+python-dotenv==1.0.0
+cryptography==42.0.4
+pybase58==2.0.1
+asyncio==3.4.3
+python-dateutil==2.8.2
