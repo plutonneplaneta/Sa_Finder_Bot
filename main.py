@@ -20,12 +20,94 @@ from telegram.ext import (
     filters,
     ConversationHandler,
 )
+from telethon.sessions import StringSession
 
 # Загрузка конфигурации
 load_dotenv()
 
 # Состояния
 ADD_CHANNEL, IMPORT_WALLET, SET_AMOUNT, SET_SLIPPAGE, REMOVE_CHANNEL, REMOVE_WALLET = range(6)
+
+
+class UserBotManager:
+    def __init__(self):
+        self.client = None
+        self.session_file = Path(__file__).parent / 'userbot.session'
+        self.phone = os.getenv("USERBOT_PHONE")
+        self.api_id = int(os.getenv("TELEGRAM_API_ID"))
+        self.api_hash = os.getenv("TELEGRAM_API_HASH")
+        self.password = os.getenv("USERBOT_PASSWORD")  # Если есть 2FA
+
+    async def initialize(self):
+        """Инициализация userbot из сохраненной сессии или создание новой"""
+        if self.session_file.exists():
+            with open(self.session_file, 'r') as f:
+                session_string = f.read().strip()
+                self.client = TelegramClient(
+                    StringSession(session_string),
+                    self.api_id,
+                    self.api_hash
+                )
+        else:
+            self.client = TelegramClient(
+                StringSession(),
+                self.api_id,
+                self.api_hash
+            )
+
+        try:
+            await self._connect()
+            return True
+        except Exception as e:
+            print(f"Ошибка инициализации UserBot: {e}")
+            return False
+
+    async def _connect(self):
+        """Подключение userbot с обработкой всех сценариев"""
+        if not self.phone:
+            raise ValueError("USERBOT_PHONE не установлен в .env")
+
+        await self.client.connect()
+
+        if not await self.client.is_user_authorized():
+            print("Авторизация UserBot...")
+            await self.client.send_code_request(self.phone)
+
+            # Если есть пароль для 2FA
+            if self.password:
+                await self.client.sign_in(
+                    phone=self.phone,
+                    code=input('Введите код из Telegram: '),
+                    password=self.password
+                )
+            else:
+                await self.client.sign_in(
+                    phone=self.phone,
+                    code=input('Введите код из Telegram: ')
+                )
+
+            # Сохраняем сессию
+            with open(self.session_file, 'w') as f:
+                f.write(self.client.session.save())
+
+        print("UserBot успешно авторизован")
+
+    async def start_monitoring(self, channels, callback):
+        """Запуск мониторинга каналов"""
+        if not self.client:
+            raise RuntimeError("UserBot не инициализирован")
+
+        @self.client.on(events.NewMessage(chats=channels))
+        async def handler(event):
+            await callback(event)
+
+        print(f"🟢 UserBot начал мониторинг {len(channels)} каналов...")
+        await self.client.run_until_disconnected()
+
+    async def stop(self):
+        """Остановка userbot"""
+        if self.client and self.client.is_connected():
+            await self.client.disconnect()
 
 
 class SecureStorage:
@@ -136,20 +218,68 @@ class TokenHunterBot:
         self.bot = Bot(token=os.getenv("TELEGRAM_TOKEN"))
         self.storage = SecureStorage()
         self.trader = SolanaTrader()
-
-        # Инициализация Telegram клиента
-        self.tg_client = TelegramClient(
-            "anon",
-            int(os.getenv("TELEGRAM_API_ID")),
-            os.getenv("TELEGRAM_API_HASH")
-        )
+        self.userbot = UserBotManager()  # Менеджер userbot
 
         # Настройка обработчиков команд
         self.app = Application.builder().token(os.getenv("TELEGRAM_TOKEN")).build()
         self._setup_handlers()
 
-        # Для хранения временных данных
-        self.user_data = {}
+
+    async def _start_background_tasks(self):
+        """Запуск фоновых задач"""
+        if not self.storage.data["channels"]:
+            print("ℹ️ Нет каналов для мониторинга")
+            return
+
+        # Инициализация userbot в фоне
+        asyncio.create_task(self._init_userbot())
+
+
+    async def _init_userbot(self):
+        """Инициализация userbot и запуск мониторинга"""
+        try:
+            success = await self.userbot.initialize()
+            if not success:
+                print("❌ Не удалось инициализировать UserBot")
+                return
+
+            channels = list(self.storage.data["channels"].keys())
+            await self.userbot.start_monitoring(
+                channels=channels,
+                callback=self._handle_channel_message
+            )
+        except Exception as e:
+            print(f"❌ Ошибка мониторинга через UserBot: {e}")
+
+
+    async def _handle_channel_message(self, event):
+        """Обработка сообщений из каналов"""
+        try:
+            tokens = await self.trader.find_tokens(event.raw_text)
+            for token in tokens:
+                await self._process_token(event, token)
+        except Exception as e:
+            print(f"Ошибка обработки сообщения: {e}")
+
+
+    async def run(self):
+        """Запуск бота"""
+        try:
+            await self.app.initialize()
+            await self.app.start()
+            await self.app.updater.start_polling()
+
+            # Запуск фоновых задач
+            await self._start_background_tasks()
+
+            print("🟢 Бот запущен и начал работу")
+            while True:
+                await asyncio.sleep(3600)
+        except Exception as e:
+            print(f"🔴 Ошибка запуска бота: {e}")
+            await self.app.stop()
+            await self.userbot.stop()
+            raise
 
     def _get_main_keyboard(self):
         """Главное меню с кнопками"""
@@ -641,20 +771,6 @@ class TokenHunterBot:
         )
         return ConversationHandler.END
 
-    async def _start_monitoring(self):
-        """Запуск мониторинга каналов"""
-        # получаем токен из окружения
-        await self.tg_client.start(bot_token=os.getenv('TELEGRAM_TOKEN'))
-
-        @self.tg_client.on(events.NewMessage(chats=list(self.storage.data["channels"].keys())))
-        async def handler(event):
-            tokens = await self.trader.find_tokens(event.raw_text)
-            for token in tokens:
-                await self._process_token(event, token)
-
-        print("🟢 Начал мониторинг каналов...")
-        await self.tg_client.run_until_disconnected()
-
     async def _process_token(self, event, token):
         """Обработка найденного токена"""
         try:
@@ -692,24 +808,6 @@ class TokenHunterBot:
                         )
         except Exception as e:
             print(f"Ошибка обработки токена: {e}")
-
-    async def run(self):
-        """Запуск бота"""
-        try:
-            await self.app.initialize()
-            await self.app.start()
-            await self.app.updater.start_polling()
-
-            # Запуск мониторинга в фоне
-            asyncio.create_task(self._start_monitoring())
-
-            print("🟢 Бот запущен и начал работу")
-            while True:
-                await asyncio.sleep(3600)
-        except Exception as e:
-            print(f"🔴 Ошибка запуска бота: {e}")
-            await self.app.stop()
-            raise
 
 async def main():
     required_vars = [
