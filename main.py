@@ -643,7 +643,7 @@ class TokenHunterBot:
 
     async def _start_monitoring(self):
         """Запуск мониторинга каналов"""
-        await self.tg_client.start()
+        await self.tg_client.start(bot_token=os.getenv('TELEGRAM_BOT_TOKEN'))
 
         @self.tg_client.on(events.NewMessage(chats=list(self.storage.data["channels"].keys())))
         async def handler(event):
